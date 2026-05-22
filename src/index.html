@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Picus Tomography Analyzer</title>
+    <meta name="description" content="Acoustic tomography analysis tool for Picus 3 PIT files. Evaluate cavity size, position, and cross-section residual strength.">
+    <link rel="stylesheet" href="style.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+
+<div class="app-container">
+    <header class="app-header" id="appHeader">
+        <div class="header-left">
+            <div class="header-logo">Picus Tomography Analyzer</div>
+            <span id="fileName"></span>
+        </div>
+        <div class="header-right">
+            <div class="view-toggle" id="viewToggle">
+                <button class="view-btn active" id="btn2D" title="2D View">2D</button>
+                <button class="view-btn" id="btn3D" title="3D View">3D</button>
+            </div>
+            <button class="btn btn-primary" id="btnLoad">Load PIT File</button>
+            <input type="file" id="fileInput" accept=".pit" multiple class="hidden">
+        </div>
+    </header>
+
+    <!-- Tab Bar -->
+    <div class="tab-bar" id="tabBar"></div>
+
+    <main class="app-main">
+        <!-- 2D Canvas Panel -->
+        <section class="canvas-panel" id="canvasPanel">
+            <canvas id="tomoCanvas"></canvas>
+            <div class="canvas-tooltip" id="tooltip"></div>
+
+            <div class="welcome-screen" id="welcomeScreen">
+                <h2>Drag & Drop .pit files or click Load</h2>
+                <p>Load multiple files at different heights for 3D reconstruction</p>
+            </div>
+        </section>
+
+        <!-- 3D View Panel (hidden by default) -->
+        <section class="canvas-panel canvas-3d" id="panel3D" style="display:none">
+            <div id="container3D" style="width:100%;height:100%"></div>
+
+            <!-- 3D Controls -->
+            <div class="controls-3d" id="controls3D">
+                <div class="ctrl-row">
+                    <label class="ctrl-label">
+                        <input type="checkbox" id="clipToggle"> Pie Slice
+                    </label>
+                </div>
+                <div class="ctrl-row" id="clipControls" style="display:none">
+                    <label class="ctrl-label">Angle
+                        <input type="range" id="clipAngle" min="0" max="360" value="0" class="ctrl-slider">
+                    </label>
+                    <label class="ctrl-label">Size
+                        <input type="range" id="clipSize" min="10" max="180" value="90" class="ctrl-slider">
+                    </label>
+                </div>
+                <div class="ctrl-row">
+                    <label class="ctrl-label">Layer Spacing
+                        <input type="range" id="heightScale" min="50" max="500" value="100" class="ctrl-slider">
+                    </label>
+                </div>
+            </div>
+
+            <div class="panel-3d-hint" id="hint3D">
+                Drag to rotate · Scroll to zoom · Right-click to pan
+            </div>
+        </section>
+
+        <!-- Results Panel -->
+        <aside class="results-panel">
+            <div id="resultsContent" style="display:none">
+
+                <div class="card">
+                    <div class="card-title">Tree Info</div>
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <span class="info-label">Species</span>
+                            <span class="info-value" id="infoSpecies">—</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Tree No.</span>
+                            <span class="info-value" id="infoTreeNo">—</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Circumference</span>
+                            <span class="info-value" id="infoCircum">—</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Meas. Height</span>
+                            <span class="info-value" id="infoHeight">—</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Date</span>
+                            <span class="info-value" id="infoDate" style="font-size:11px">—</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Sensors</span>
+                            <span class="info-value" id="infoSensors">—</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Residual Strength</div>
+                    <div class="strength-gauge">
+                        <div><span class="gauge-value safe" id="strengthValue">—</span><span class="gauge-unit">%</span></div>
+                        <div class="gauge-label">Residual Bending Strength</div>
+                        <div style="margin-top:8px"><span class="badge badge-safe" id="strengthBadge">—</span></div>
+                    </div>
+                    <div class="metrics-grid" style="margin-top:12px">
+                        <div class="metric">
+                            <div class="metric-value" id="metricEquivDiam">—</div>
+                            <div class="metric-label">Equiv. Diameter</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value" id="metricEquivPerim">—</div>
+                            <div class="metric-label">Equiv. Perimeter</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value" id="metricAxis">—</div>
+                            <div class="metric-label">Weak Axis</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value" id="metricMinWall">—</div>
+                            <div class="metric-label">Min Wall</div>
+                        </div>
+                    </div>
+                    <div style="margin-top:10px;text-align:center">
+                        <button class="btn btn-sm" id="btnShowCalc">Show Calculation</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Decay Coefficients</div>
+
+                    <div class="coeff-slider">
+                        <div class="coeff-slider-header">
+                            <span class="coeff-slider-label"><span class="coeff-dot" style="background:var(--zone-healthy)"></span> Healthy</span>
+                            <span class="coeff-value" id="value-healthy">1.00</span>
+                        </div>
+                        <input type="range" id="slider-healthy" min="0" max="100" value="100">
+                    </div>
+                    <div class="coeff-slider">
+                        <div class="coeff-slider-header">
+                            <span class="coeff-slider-label"><span class="coeff-dot" style="background:var(--zone-mild)"></span> Mild</span>
+                            <span class="coeff-value" id="value-mild">0.85</span>
+                        </div>
+                        <input type="range" id="slider-mild" min="0" max="100" value="85">
+                    </div>
+                    <div class="coeff-slider">
+                        <div class="coeff-slider-header">
+                            <span class="coeff-slider-label"><span class="coeff-dot" style="background:var(--zone-moderate)"></span> Moderate</span>
+                            <span class="coeff-value" id="value-moderate">0.50</span>
+                        </div>
+                        <input type="range" id="slider-moderate" min="0" max="100" value="50">
+                    </div>
+                    <div class="coeff-slider">
+                        <div class="coeff-slider-header">
+                            <span class="coeff-slider-label"><span class="coeff-dot" style="background:var(--zone-severe)"></span> Severe</span>
+                            <span class="coeff-value" id="value-severe">0.20</span>
+                        </div>
+                        <input type="range" id="slider-severe" min="0" max="100" value="20">
+                    </div>
+                    <div class="coeff-slider">
+                        <div class="coeff-slider-header">
+                            <span class="coeff-slider-label"><span class="coeff-dot" style="background:var(--zone-cavity)"></span> Cavity</span>
+                            <span class="coeff-value" id="value-cavity">0.05</span>
+                        </div>
+                        <input type="range" id="slider-cavity" min="0" max="100" value="5">
+                    </div>
+
+                    <div class="actions-row" style="margin-top:8px">
+                        <button class="btn btn-sm" id="btnExportCoeff">Export Coefficients</button>
+                        <button class="btn btn-sm" id="btnImportCoeff">Import Coefficients</button>
+                        <input type="file" id="coeffFileInput" accept=".json" class="hidden">
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Area Distribution</div>
+                    <div class="area-bar" id="areaBar"></div>
+                    <div class="area-legend">
+                        <div class="area-legend-item">
+                            <span class="area-legend-dot" style="background:var(--zone-healthy)"></span>
+                            Healthy <span class="area-legend-pct" id="area-healthy">—</span>
+                        </div>
+                        <div class="area-legend-item">
+                            <span class="area-legend-dot" style="background:var(--zone-mild)"></span>
+                            Mild <span class="area-legend-pct" id="area-mild">—</span>
+                        </div>
+                        <div class="area-legend-item">
+                            <span class="area-legend-dot" style="background:var(--zone-moderate)"></span>
+                            Moderate <span class="area-legend-pct" id="area-moderate">—</span>
+                        </div>
+                        <div class="area-legend-item">
+                            <span class="area-legend-dot" style="background:var(--zone-severe)"></span>
+                            Severe <span class="area-legend-pct" id="area-severe">—</span>
+                        </div>
+                        <div class="area-legend-item">
+                            <span class="area-legend-dot" style="background:var(--zone-cavity)"></span>
+                            Cavity <span class="area-legend-pct" id="area-cavity">—</span>
+                        </div>
+                    </div>
+                    <div class="metrics-grid" style="margin-top:10px">
+                        <div class="metric">
+                            <div class="metric-value" id="metricTrunkArea">—</div>
+                            <div class="metric-label">Cross-Section Area</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value" id="metricEffArea">—</div>
+                            <div class="metric-label">Effective Ratio</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Overlays</div>
+                    <div class="toggle-group">
+                        <button class="toggle-btn active" id="toggleCavities">Cavity Boundary</button>
+                        <button class="toggle-btn active" id="toggleAxis">Weak Axis</button>
+                        <button class="toggle-btn" id="toggleWall">Wall Thickness</button>
+                    </div>
+                    <div class="actions-row" style="margin-top:14px">
+                        <button class="btn btn-primary btn-sm" id="btnExportReport">Export Report</button>
+                        <button class="btn btn-sm" id="btnExportPNG">Save PNG</button>
+                    </div>
+                </div>
+
+            </div>
+        </aside>
+    </main>
+</div>
+
+<div class="drop-zone" id="dropZone">
+    <div class="drop-zone-inner">
+        <div>Drop PIT files here</div>
+    </div>
+</div>
+
+<!-- Calculation Detail Modal -->
+<div class="calc-modal-overlay" id="calcModal" style="display:none">
+    <div class="calc-modal">
+        <div class="calc-modal-header">
+            <span class="calc-modal-title">Calculation Process</span>
+            <button class="tab-close" id="calcModalClose" style="width:24px;height:24px;font-size:18px">&times;</button>
+        </div>
+        <div class="calc-modal-body" id="calcModalBody"></div>
+    </div>
+</div>
+
+<script type="module" src="app.js"></script>
+
+</body>
+</html>
