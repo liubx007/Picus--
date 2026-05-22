@@ -5,6 +5,8 @@
  * compass, color legend, and optional overlays (cavity boundaries, principal axis).
  */
 
+import { pointInPolygon } from './cavity-detector.js';
+
 export class TomoRenderer {
     /**
      * @param {HTMLCanvasElement} canvas
@@ -14,7 +16,7 @@ export class TomoRenderer {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.options = {
-            dotRadius: 5,
+            dotRadius: 4,
             showSensors: true,
             showOutline: true,
             showCompass: true,
@@ -137,7 +139,7 @@ export class TomoRenderer {
         if (this.options.showCompass) this._drawCompass(ctx, pitData);
 
         // 6. Legend
-        if (this.options.showLegend) this._drawLegend(ctx);
+        if (this.options.showLegend) this._drawLegend(ctx, this.transform.offsetX, this.transform.offsetY);
 
         // 7. Overlays
         if (overlays.cavityBoundaries) this._drawCavityBoundaries(ctx, overlays.cavityBoundaries);
@@ -195,37 +197,127 @@ export class TomoRenderer {
         return bestDist < 4 ? best : null;
     }
 
+    /** Compute dynamic dot radius to scale with the grid, avoiding gaps */
+    _getDynamicDotRadius() {
+        if (!this.pitData || !this.transform) return this.options.dotRadius * this.zoom;
+        
+        // Cache the computed radius on the instance to avoid re-calculating it for every point
+        if (this._cachedDynamicRadius && this._cachedScale === this.transform.scale && this._cachedZoom === this.zoom) {
+            return this._cachedDynamicRadius;
+        }
+        
+        let gridSpacing = 0.5; // fallback
+        const pts = this.pitData.tomoGrid;
+        if (pts && pts.length > 1) {
+            let minXDiff = Infinity;
+            const sampleSize = Math.min(200, pts.length);
+            for (let i = 0; i < sampleSize; i++) {
+                for (let j = i + 1; j < sampleSize; j++) {
+                    const diff = Math.abs(pts[i].x - pts[j].x);
+                    if (diff > 0.01 && diff < minXDiff) {
+                        minXDiff = diff;
+                    }
+                }
+            }
+            if (minXDiff < Infinity && minXDiff > 0.1 && minXDiff < 2.0) {
+                gridSpacing = minXDiff;
+            }
+        }
+        
+        // In python, dot diameter is roughly 1.3 times the grid spacing.
+        // So dot radius is roughly 0.65 times the grid spacing in data coordinates.
+        const r = Math.max(1.5, gridSpacing * 0.65 * this.transform.scale);
+        
+        this._cachedDynamicRadius = r;
+        this._cachedScale = this.transform.scale;
+        this._cachedZoom = this.zoom;
+        
+        return r;
+    }
+
     // ── Drawing Methods ──
 
     _drawGrid(ctx, pitData) {
         const t = this.transform;
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
-        ctx.lineWidth = 0.5;
-        ctx.font = '10px Inter, sans-serif';
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+        if (!t) return;
+        
+        const dataW = t.maxX - t.minX;
+        const dataH = t.maxY - t.minY;
+        const boxWidth = dataW * t.scale;
+        const boxHeight = dataH * t.scale;
+        const boxX = t.offsetX;
+        const boxY = t.offsetY;
 
-        const step = this._niceStep((t.maxX - t.minX) / 6);
+        ctx.save();
+
+        // 1. Draw solid white background for the coordinate box
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+
+        // 2. Setup grid line styling (solid, light gray, matching Python)
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 0.5;
+        ctx.setLineDash([]);
+
+        // Find a nice step size
+        const step = this._niceStep(dataW / 6);
         const startX = Math.ceil(t.minX / step) * step;
         const startY = Math.ceil(t.minY / step) * step;
 
+        // Draw vertical grid lines (inside the box)
         for (let x = startX; x <= t.maxX; x += step) {
             const { cx } = this.dataToCanvas(x, 0);
+            if (cx < boxX - 0.1 || cx > boxX + boxWidth + 0.1) continue;
             ctx.beginPath();
-            ctx.moveTo(cx, this.options.padding / 2);
-            ctx.lineTo(cx, this.displayHeight - this.options.padding / 2);
+            ctx.moveTo(cx, boxY);
+            ctx.lineTo(cx, boxY + boxHeight);
             ctx.stroke();
-            ctx.fillText(Math.round(x * 10) / 10, cx + 2, this.displayHeight - 8);
         }
 
+        // Draw horizontal grid lines (inside the box)
         for (let y = startY; y <= t.maxY; y += step) {
             const { cy } = this.dataToCanvas(0, y);
+            if (cy < boxY - 0.1 || cy > boxY + boxHeight + 0.1) continue;
             ctx.beginPath();
-            ctx.moveTo(this.options.padding / 2, cy);
-            ctx.lineTo(this.displayWidth - this.options.padding / 2, cy);
+            ctx.moveTo(boxX, cy);
+            ctx.lineTo(boxX + boxWidth, cy);
             ctx.stroke();
-            ctx.fillText(Math.round(y * 10) / 10, 4, cy - 2);
         }
+
+        // 3. Draw tick labels outside the box (no dashes!)
+        ctx.setLineDash([]);
+        ctx.font = '8.5px Inter, sans-serif';
+        ctx.fillStyle = '#94a3b8';
+
+        // X-axis labels (below the box)
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (let x = startX; x <= t.maxX; x += step) {
+            const { cx } = this.dataToCanvas(x, 0);
+            if (cx < boxX - 1 || cx > boxX + boxWidth + 1) continue;
+            ctx.fillText(Math.round(x * 10) / 10, cx, boxY + boxHeight + 6);
+        }
+
+        // Y-axis labels (to the left of the box)
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (let y = startY; y <= t.maxY; y += step) {
+            const { cy } = this.dataToCanvas(0, y);
+            if (cy < boxY - 1 || cy > boxY + boxHeight + 1) continue;
+            ctx.fillText(Math.round(y * 10) / 10, boxX - 6, cy);
+        }
+
+        // 4. Draw outer border (box spine, 0.5px matching Python)
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
+
+        // 5. Draw Section Title inside the grid box (top right, bold 11px Inter)
+        ctx.font = 'bold 11px Inter, sans-serif';
+        ctx.fillStyle = '#1d1d1f';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText('2D Acoustic Tomogram', boxX + boxWidth - 12, boxY + 12);
 
         ctx.restore();
     }
@@ -240,10 +332,14 @@ export class TomoRenderer {
     }
 
     _drawTomoGrid(ctx, pitData, overlays) {
-        const r = this.options.dotRadius * this.zoom;
+        const r = this._getDynamicDotRadius();
         const zoneAlpha = overlays.zoneAlpha; // optional per-zone opacity
+        const outline = pitData.sensors.map(s => ({ x: s.x, y: s.y }));
 
         for (const pt of pitData.tomoGrid) {
+            // Filter points: only draw points inside the trunk outline boundary
+            if (!pointInPolygon(pt.x, pt.y, outline)) continue;
+
             const { cx, cy } = this.dataToCanvas(pt.x, pt.y);
 
             // Skip points outside visible area
@@ -261,7 +357,7 @@ export class TomoRenderer {
 
             // Subtle dark outline for contrast on light backgrounds
             ctx.strokeStyle = `rgba(0,0,0,0.15)`;
-            ctx.lineWidth = 0.4;
+            ctx.lineWidth = 0.3;
             ctx.stroke();
         }
     }
@@ -271,8 +367,9 @@ export class TomoRenderer {
         if (!sensors || sensors.length < 3) return;
 
         ctx.save();
+        // Semi-transparent blue matching python alpha=0.5
         ctx.strokeStyle = 'rgba(59, 130, 246, 0.5)';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.8;
         ctx.setLineDash([]);
 
         // Draw smooth closed curve through sensor points using cardinal spline
@@ -315,17 +412,18 @@ export class TomoRenderer {
 
             // Sensor dot — blue with white border
             ctx.beginPath();
-            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(59, 130, 246, 0.85)';
+            ctx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+            ctx.fillStyle = '#3b82f6';
             ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.2;
             ctx.stroke();
 
             // Label
-            ctx.font = 'bold 10px Inter, sans-serif';
-            ctx.fillStyle = 'rgba(30, 64, 175, 0.85)';
+            ctx.font = 'bold 9.5px Inter, sans-serif';
+            ctx.fillStyle = '#1e40af';
             ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
 
             // Offset label away from center
             const centerX = (pitData.gridBounds.minX + pitData.gridBounds.maxX) / 2;
@@ -336,7 +434,7 @@ export class TomoRenderer {
             const offX = (dx / dist) * 18;
             const offY = -(dy / dist) * 18;
 
-            ctx.fillText(String(s.id), cx + offX, cy + offY + 4);
+            ctx.fillText(String(s.id), cx + offX, cy + offY);
         }
         ctx.restore();
     }
@@ -356,40 +454,67 @@ export class TomoRenderer {
         const angle = Math.atan2(dy, dx);
 
         ctx.save();
-        ctx.font = 'bold 14px Inter, sans-serif';
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.9)';
+        ctx.font = 'bold 11px Inter, sans-serif';
+        ctx.fillStyle = '#10b981';
         ctx.textAlign = 'center';
-        const nX = cx + Math.cos(angle) * 25;
-        const nY = cy + Math.sin(angle) * 25;
-        ctx.fillText('N', nX, nY + 5);
+        ctx.textBaseline = 'middle';
 
-        ctx.strokeStyle = 'rgba(16, 185, 129, 0.7)';
+        const nX = cx + Math.cos(angle) * 28;
+        const nY = cy + Math.sin(angle) * 28;
+        ctx.fillText('N', nX, nY);
+
+        // Draw arrow pointing from N label towards the sensor
+        ctx.strokeStyle = '#10b981';
+        ctx.fillStyle = '#10b981';
         ctx.lineWidth = 1.5;
+        
+        const arrowStartX = cx + Math.cos(angle) * 20;
+        const arrowStartY = cy + Math.sin(angle) * 20;
+        const arrowEndX = cx + Math.cos(angle) * 8;
+        const arrowEndY = cy + Math.sin(angle) * 8;
+        
         ctx.beginPath();
-        ctx.moveTo(cx + Math.cos(angle) * 10, cy + Math.sin(angle) * 10);
-        ctx.lineTo(cx + Math.cos(angle) * 20, cy + Math.sin(angle) * 20);
+        ctx.moveTo(arrowStartX, arrowStartY);
+        ctx.lineTo(arrowEndX, arrowEndY);
         ctx.stroke();
+
+        // Draw arrowhead pointing to the sensor
+        const arrowAngle = angle + Math.PI;
+        const headLength = 5;
+        ctx.beginPath();
+        ctx.moveTo(arrowEndX, arrowEndY);
+        ctx.lineTo(
+            arrowEndX - headLength * Math.cos(arrowAngle - Math.PI / 6),
+            arrowEndY - headLength * Math.sin(arrowAngle - Math.PI / 6)
+        );
+        ctx.lineTo(
+            arrowEndX - headLength * Math.cos(arrowAngle + Math.PI / 6),
+            arrowEndY - headLength * Math.sin(arrowAngle + Math.PI / 6)
+        );
+        ctx.closePath();
+        ctx.fill();
 
         ctx.restore();
     }
 
-    _drawLegend(ctx) {
-        const x = 15;
-        const y = 15;
+    _drawLegend(ctx, boxX, boxY) {
+        // Position legend card inside top-left of the coordinate box
+        const x = boxX + 12;
+        const y = boxY + 12;
         const w = 180;
         const h = 12;
 
         ctx.save();
 
-        // Background pill
+        // Background pill (more opaque white for clean look inside coordinate box)
         const bgW = w + 70;
         const bgH = h + 22;
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
         ctx.beginPath();
         ctx.roundRect(x - 8, y - 6, bgW, bgH, 8);
         ctx.fill();
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.08)';
-        ctx.lineWidth = 0.5;
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 0.8;
         ctx.stroke();
 
         // Gradient bar
@@ -408,7 +533,7 @@ export class TomoRenderer {
 
         // Labels
         ctx.font = '9px Inter, sans-serif';
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillStyle = '#6e6e73';
         ctx.textAlign = 'left';
         ctx.fillText('v:100%', x, y + h + 11);
         ctx.textAlign = 'right';
@@ -419,7 +544,7 @@ export class TomoRenderer {
 
     _drawCavityBoundaries(ctx, boundaries) {
         ctx.save();
-        const r = this.options.dotRadius * this.zoom;
+        const r = this._getDynamicDotRadius();
 
         for (const region of boundaries) {
             if (!region.boundary || region.boundary.length < 2) continue;
@@ -484,11 +609,15 @@ export class TomoRenderer {
         ctx.save();
 
         const { cx: pcx, cy: pcy } = this.dataToCanvas(axis.cx, axis.cy);
-        const len = 100;
+        
+        // Compute line length based on physical tree scale (like Python)
+        const L = (this.transform.maxX - this.transform.minX) || 40.0;
+        const len = L * 0.45 * this.transform.scale;
+        
         const rad = axis.angle * Math.PI / 180;
 
         // Min axis (weakest direction) - red dashed
-        ctx.strokeStyle = '#ff475780';
+        ctx.strokeStyle = '#ff3b30';
         ctx.lineWidth = 1.5;
         ctx.setLineDash([6, 4]);
         ctx.beginPath();
@@ -496,13 +625,17 @@ export class TomoRenderer {
         ctx.lineTo(pcx + Math.cos(rad) * len, pcy - Math.sin(rad) * len);
         ctx.stroke();
 
-        // Label
-        ctx.font = '9px Inter, sans-serif';
-        ctx.fillStyle = '#ff4757';
-        ctx.textAlign = 'left';
-        ctx.fillText(`I_min axis: ${Math.round(axis.angle)}°`, pcx + Math.cos(rad) * len + 5, pcy - Math.sin(rad) * len);
-
+        // Draw center cross marker (+)
+        ctx.strokeStyle = '#ff3b30';
+        ctx.lineWidth = 1.5;
         ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(pcx - 5, pcy);
+        ctx.lineTo(pcx + 5, pcy);
+        ctx.moveTo(pcx, pcy - 5);
+        ctx.lineTo(pcx, pcy + 5);
+        ctx.stroke();
+
         ctx.restore();
     }
 
@@ -510,35 +643,47 @@ export class TomoRenderer {
         if (!wallData || !wallData.thicknessProfile) return;
         ctx.save();
 
-        const { cx: ccx, cy: ccy } = this.dataToCanvas(wallData.center.x, wallData.center.y);
-
-        // Draw thickness arrows at min thickness direction
+        const center = wallData.center;
+        
+        // Find minimum thickness entry
         let minEntry = wallData.thicknessProfile[0];
         for (const entry of wallData.thicknessProfile) {
             if (entry.thickness < minEntry.thickness) minEntry = entry;
         }
 
         const rad = minEntry.angle * Math.PI / 180;
-        const startR = (minEntry.trunkRadius - minEntry.thickness) * this.transform.scale;
-        const endR = minEntry.trunkRadius * this.transform.scale;
 
-        ctx.strokeStyle = '#ffb347';
-        ctx.lineWidth = 2;
+        // Calculate physical inner and outer boundary points along the ray
+        const outerX = center.x + Math.cos(rad) * minEntry.trunkRadius;
+        const outerY = center.y + Math.sin(rad) * minEntry.trunkRadius;
+        const innerX = center.x + Math.cos(rad) * (minEntry.trunkRadius - minEntry.thickness);
+        const innerY = center.y + Math.sin(rad) * (minEntry.trunkRadius - minEntry.thickness);
+
+        // Convert boundary coordinates to canvas pixels (automatically handles flips/offsets/scale)
+        const outer = this.dataToCanvas(outerX, outerY);
+        const inner = this.dataToCanvas(innerX, innerY);
+
+        // Draw dotted thickness line segment
+        ctx.strokeStyle = '#ff9500';
+        ctx.lineWidth = 2.0;
         ctx.setLineDash([3, 2]);
         ctx.beginPath();
-        ctx.moveTo(ccx + Math.cos(rad) * startR, ccy - Math.sin(rad) * startR);
-        ctx.lineTo(ccx + Math.cos(rad) * endR, ccy - Math.sin(rad) * endR);
+        ctx.moveTo(inner.cx, inner.cy);
+        ctx.lineTo(outer.cx, outer.cy);
         ctx.stroke();
 
-        ctx.font = '10px Inter, sans-serif';
-        ctx.fillStyle = '#ffb347';
+        // Label position: middle of the segment, offset perpendicular to ray
+        const midX = center.x + Math.cos(rad) * (minEntry.trunkRadius - minEntry.thickness / 2);
+        const midY = center.y + Math.sin(rad) * (minEntry.trunkRadius - minEntry.thickness / 2);
+        const perpX = -Math.sin(rad) * 1.8;
+        const perpY = Math.cos(rad) * 1.8;
+        const textPt = this.dataToCanvas(midX + perpX, midY + perpY);
+
+        ctx.font = 'bold 8.5px Inter, sans-serif';
+        ctx.fillStyle = '#ff9500';
         ctx.textAlign = 'center';
-        const labelR = (startR + endR) / 2;
-        ctx.fillText(
-            `t=${minEntry.thickness.toFixed(1)}cm`,
-            ccx + Math.cos(rad) * labelR + 15,
-            ccy - Math.sin(rad) * labelR
-        );
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`t=${minEntry.thickness.toFixed(1)}cm`, textPt.cx, textPt.cy);
 
         ctx.setLineDash([]);
         ctx.restore();
